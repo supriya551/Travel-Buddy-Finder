@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getSession, clearSession } from '../utils/auth.js';
+import { fetchMatches, connectUser, fetchMyTrips, createTrip, fetchTrips, joinTrip } from '../utils/api.js';
+import Chat from '../components/Chat.jsx';
 import '../../dashboard.css';
 
 const PANEL_TITLES = {
@@ -107,21 +109,98 @@ function Header({ activePanel, profile, sidebarCollapsed, onToggleSidebar, onSwi
 }
 
 // ── Panel: Home ───────────────────────────────────────────────────────────────
-function PanelHome({ onSwitch }) {
+function PanelHome({ onSwitch, searchQuery, setSearchQuery }) {
   const [search, setSearch] = useState('');
+  const [matches, setMatches] = useState([]);
   const [connects, setConnects] = useState({});
+  const [matchesError, setMatchesError] = useState(null);
+  const [searchResults, setSearchResults] = useState(null); // null = not searched yet
+  const [searchLoading, setSearchLoading] = useState(false);
 
-  function handleSearchKey(e) {
-    if (e.key === 'Enter' && search.trim().length > 0) onSwitch('filter');
+  useEffect(() => {
+    fetchMatches()
+      .then(data => setMatches(data))
+      .catch(() => setMatchesError('Could not load buddy matches.'));
+  }, []);
+
+  async function handleSearchKey(e) {
+    if (e.key === 'Enter' && search.trim().length > 0) {
+      setSearchLoading(true);
+      try {
+        const results = await fetchTrips({ destination: search.trim() });
+        setSearchResults(results);
+      } catch {
+        setSearchResults([]);
+      } finally {
+        setSearchLoading(false);
+      }
+    }
+    if (e.key === 'Escape') {
+      setSearch('');
+      setSearchResults(null);
+    }
+  }
+
+  function clearSearch() {
+    setSearch('');
+    setSearchResults(null);
+  }
+
+  async function handleConnect(match) {
+    try {
+      await connectUser(match.id);
+      setConnects(c => ({ ...c, [match.id]: true }));
+    } catch (err) {
+      if (err.status === 409) {
+        setConnects(c => ({ ...c, [match.id]: true }));
+      }
+    }
   }
 
   return (
     <section className="panel active">
-      <div className="home-search-bar">
+      <div className="home-search-bar" style={{ position: 'relative' }}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="text" placeholder="Search destinations, trips, buddies..." value={search}
-          onChange={e => setSearch(e.target.value)} onKeyDown={handleSearchKey} />
+          onChange={e => { setSearch(e.target.value); if (!e.target.value) setSearchResults(null); }}
+          onKeyDown={handleSearchKey} />
+        {search && (
+          <button onClick={clearSearch} style={{ position: 'absolute', right: '1rem', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#888', fontSize: '1rem', padding: 0 }}>✕</button>
+        )}
       </div>
+
+      {/* Inline search results */}
+      {searchLoading && (
+        <p className="panel-loading" style={{ marginBottom: '1rem' }}>Searching…</p>
+      )}
+      {searchResults !== null && !searchLoading && (
+        <div className="section-block" style={{ marginBottom: '1.5rem' }}>
+          <div className="block-header">
+            <h2>Search results for "{search}"</h2>
+            <a href="#" className="see-all" onClick={e => { e.preventDefault(); clearSearch(); }}>Clear</a>
+          </div>
+          {searchResults.length === 0 ? (
+            <p className="panel-empty">No trips found for "{search}".</p>
+          ) : (
+            <div className="join-list" style={{ marginTop: '0.75rem' }}>
+              {searchResults.map(t => {
+                const start = t.startDate ? new Date(t.startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+                const end   = t.endDate   ? new Date(t.endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+                return (
+                  <div className="join-card" key={t.id}>
+                    <div className="jc-body">
+                      <h3>{t.title || t.destination}</h3>
+                      <p>{start}{end ? ` – ${end}` : ''}</p>
+                      <div className="trip-meta"><span>${t.budget}</span><span>{t.destination}</span></div>
+                      {t.styles?.length > 0 && <div className="dest-tags">{t.styles.map(s => <span key={s}>{s}</span>)}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
       <div className="panel-grid">
         <div className="col-main">
           {/* Travelers heading out */}
@@ -184,18 +263,27 @@ function PanelHome({ onSwitch }) {
           <div className="side-card">
             <h3>New Buddy Matches</h3>
             <div className="match-list">
-              {[{a:'A',name:'Arjun S.',dest:'Bali, Indonesia'},{a:'L',name:'Lena M.',dest:'Iceland'},{a:'K',name:'Kenji T.',dest:'Peru'}].map(m => (
-                <div className="match-row" key={m.name}>
-                  <div className="match-avatar">{m.a}</div>
-                  <div className="match-info"><span className="match-name">{m.name}</span><span className="match-dest">{m.dest}</span></div>
-                  <button className="btn-connect"
-                    style={connects[m.name] ? {background:'#16a34a'} : {}}
-                    disabled={!!connects[m.name]}
-                    onClick={() => setConnects(c => ({...c, [m.name]: true}))}>
-                    {connects[m.name] ? 'Sent' : 'Connect'}
-                  </button>
-                </div>
-              ))}
+              {matchesError ? (
+                <p className="panel-error">{matchesError}</p>
+              ) : matches.length === 0 ? (
+                <p className="panel-empty">No buddy matches yet. Create a trip to find travel companions!</p>
+              ) : (
+                matches.map(m => (
+                  <div className="match-row" key={m.id}>
+                    <div className="match-avatar">{m.name?.[0]?.toUpperCase()}</div>
+                    <div className="match-info">
+                      <span className="match-name">{m.name}</span>
+                      <span className="match-dest">{m.matchedDestination}</span>
+                    </div>
+                    <button className="btn-connect"
+                      style={connects[m.id] ? {background:'#16a34a'} : {}}
+                      disabled={!!connects[m.id]}
+                      onClick={() => handleConnect(m)}>
+                      {connects[m.id] ? 'Sent' : 'Connect'}
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
           <div className="side-card">
@@ -233,8 +321,40 @@ function PanelHome({ onSwitch }) {
 // ── Panel: Create Trip ────────────────────────────────────────────────────────
 function PanelCreate({ onSwitch }) {
   const [chips, setChips] = useState([]);
+  const [form, setForm] = useState({
+    from: '', destination: '', startDate: '', endDate: '',
+    budget: '', buddiesNeeded: '', description: '', genderPreference: 'any',
+  });
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
   function toggleChip(c) { setChips(s => s.includes(c) ? s.filter(x=>x!==c) : [...s,c]); }
-  function handleSubmit(e) { e.preventDefault(); onSwitch('mytrips'); }
+  function set(field, val) { setForm(f => ({ ...f, [field]: val })); setError(null); }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      await createTrip({
+        title: form.from && form.destination ? `${form.from} to ${form.destination}` : form.destination,
+        destination: form.destination,
+        startDate: form.startDate,
+        endDate: form.endDate,
+        budget: Number(form.budget),
+        buddiesNeeded: form.buddiesNeeded ? Number(form.buddiesNeeded) : 1,
+        description: form.description,
+        styles: chips,
+        genderPreference: form.genderPreference || 'any',
+      });
+      onSwitch('mytrips');
+    } catch (err) {
+      setError(err.message || 'Failed to create trip.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <section className="panel active">
       <div className="form-panel">
@@ -242,18 +362,18 @@ function PanelCreate({ onSwitch }) {
         <p className="form-panel-sub">Post your trip and find buddies heading the same way.</p>
         <form className="trip-form" onSubmit={handleSubmit}>
           <div className="form-row">
-            <div className="form-group"><label>From</label><input type="text" placeholder="e.g. Mumbai" /></div>
-            <div className="form-group"><label>Destination</label><input type="text" placeholder="e.g. Tokyo" /></div>
+            <div className="form-group"><label>From</label><input type="text" placeholder="e.g. Mumbai" value={form.from} onChange={e => set('from', e.target.value)} /></div>
+            <div className="form-group"><label>Destination *</label><input type="text" placeholder="e.g. Tokyo" value={form.destination} onChange={e => set('destination', e.target.value)} required /></div>
           </div>
           <div className="form-row">
-            <div className="form-group"><label>Start Date</label><input type="date" /></div>
-            <div className="form-group"><label>End Date</label><input type="date" /></div>
+            <div className="form-group"><label>Start Date *</label><input type="date" value={form.startDate} onChange={e => set('startDate', e.target.value)} required /></div>
+            <div className="form-group"><label>End Date *</label><input type="date" value={form.endDate} onChange={e => set('endDate', e.target.value)} required /></div>
           </div>
           <div className="form-row">
-            <div className="form-group"><label>Budget (USD)</label><input type="number" placeholder="e.g. 1200" /></div>
-            <div className="form-group"><label>Buddies Needed</label><input type="number" placeholder="e.g. 2" min="1" max="10" /></div>
+            <div className="form-group"><label>Budget (USD) *</label><input type="number" placeholder="e.g. 1200" value={form.budget} onChange={e => set('budget', e.target.value)} required /></div>
+            <div className="form-group"><label>Buddies Needed</label><input type="number" placeholder="e.g. 2" min="1" max="10" value={form.buddiesNeeded} onChange={e => set('buddiesNeeded', e.target.value)} /></div>
           </div>
-          <div className="form-group"><label>Description</label><textarea rows="3" placeholder="Tell potential buddies about your trip..."></textarea></div>
+          <div className="form-group"><label>Description</label><textarea rows="3" placeholder="Tell potential buddies about your trip..." value={form.description} onChange={e => set('description', e.target.value)}></textarea></div>
           <div className="form-group">
             <label>Travel Style</label>
             <div className="style-chips">
@@ -262,131 +382,212 @@ function PanelCreate({ onSwitch }) {
               ))}
             </div>
           </div>
-          <button type="submit" className="btn-primary-dash">Post Trip</button>
+          {error && <p className="panel-error">{error}</p>}
+          <button type="submit" className="btn-primary-dash" disabled={loading}>
+            {loading ? 'Posting…' : 'Post Trip'}
+          </button>
         </form>
       </div>
     </section>
   );
 }
 
+// ── Trip Detail Modal ─────────────────────────────────────────────────────────
+function TripDetailModal({ trip, onClose }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKey);
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = '';
+    };
+  }, [onClose]);
+
+  if (!trip) return null;
+
+  const start = trip.startDate ? new Date(trip.startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
+  const end   = trip.endDate   ? new Date(trip.endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
+  const isUpcoming = new Date(trip.startDate) > new Date();
+
+  return (
+    <div className="modal-overlay open" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal" style={{ maxWidth: '520px', width: '100%' }}>
+        <button className="modal-close" onClick={onClose}>✕</button>
+
+        <div style={{ padding: '0.5rem 0 1.25rem' }}>
+          <span className={`status-chip status-${isUpcoming ? 'upcoming' : 'past'}`} style={{ marginBottom: '0.75rem', display: 'inline-block' }}>
+            {isUpcoming ? 'Upcoming' : 'Completed'}
+          </span>
+          <h2 style={{ fontSize: '1.3rem', fontWeight: 700, marginBottom: '0.25rem' }}>{trip.title || trip.destination}</h2>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>📍 {trip.destination}</p>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
+          <div className="trip-detail-stat">
+            <span className="trip-detail-label">Start Date</span>
+            <span className="trip-detail-value">{start}</span>
+          </div>
+          <div className="trip-detail-stat">
+            <span className="trip-detail-label">End Date</span>
+            <span className="trip-detail-value">{end}</span>
+          </div>
+          <div className="trip-detail-stat">
+            <span className="trip-detail-label">Budget</span>
+            <span className="trip-detail-value">${trip.budget?.toLocaleString()}</span>
+          </div>
+          <div className="trip-detail-stat">
+            <span className="trip-detail-label">Buddies Needed</span>
+            <span className="trip-detail-value">{trip.buddiesNeeded || 1}</span>
+          </div>
+          <div className="trip-detail-stat">
+            <span className="trip-detail-label">Join Requests</span>
+            <span className="trip-detail-value">{trip.joinRequests?.length || 0}</span>
+          </div>
+          <div className="trip-detail-stat">
+            <span className="trip-detail-label">Gender Preference</span>
+            <span className="trip-detail-value" style={{ textTransform: 'capitalize' }}>{trip.genderPreference || 'Any'}</span>
+          </div>
+        </div>
+
+        {trip.styles?.length > 0 && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <span className="trip-detail-label">Travel Style</span>
+            <div className="dest-tags" style={{ marginTop: '0.4rem' }}>
+              {trip.styles.map(s => <span key={s}>{s}</span>)}
+            </div>
+          </div>
+        )}
+
+        {trip.description && (
+          <div style={{ marginBottom: '1rem' }}>
+            <span className="trip-detail-label">Description</span>
+            <p style={{ marginTop: '0.4rem', fontSize: '0.9rem', color: 'var(--text)', lineHeight: 1.6 }}>{trip.description}</p>
+          </div>
+        )}
+
+        <button className="btn-primary btn-full" onClick={onClose} style={{ marginTop: '0.5rem' }}>Close</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Panel: My Trips ───────────────────────────────────────────────────────────
 function PanelMyTrips() {
+  const [trips, setTrips] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [selectedTrip, setSelectedTrip] = useState(null);
+
+  useEffect(() => {
+    fetchMyTrips()
+      .then(data => { setTrips(data); setLoading(false); })
+      .catch(err => { setError(err.message || 'Failed to load trips.'); setLoading(false); });
+  }, []);
+
+  function tripStatus(startDate) {
+    return new Date(startDate) > new Date() ? 'upcoming' : 'past';
+  }
+
+  if (loading) return <section className="panel active"><p className="panel-loading">Loading your trips…</p></section>;
+
   return (
     <section className="panel active">
       <h2 className="panel-heading">My Trips</h2>
+      {error && <p className="panel-error">{error}</p>}
+      {!error && trips.length === 0 && (
+        <p className="panel-empty">You haven't created any trips yet. <a href="#" onClick={e => e.preventDefault()}>Create your first trip!</a></p>
+      )}
       <div className="my-trips-grid">
-        {[{img:'1493976040374-85c8e12f0c0e',status:'upcoming',title:'Tokyo to Kyoto',sub:'14 Jan – 28 Jan 2026 · Japan',price:'$1,400',buddies:'2 buddies'},{img:'1524492412937-b28074a5d7da',status:'upcoming',title:'Delhi to Jaipur',sub:'3 Mar – 10 Mar 2026 · India',price:'$620',buddies:'1 buddy'},{img:'1506905925346-21bda4d32df4',status:'past',title:'Alps Trek',sub:'Aug 2025 · Switzerland',price:'$2,100',buddies:'3 buddies'}].map(t=>(
-          <div className="my-trip-card" key={t.title}>
-            <img src={`https://images.unsplash.com/photo-${t.img}?w=400&q=80`} alt={t.title} />
-            <div className="mtc-body">
-              <span className={`status-chip status-${t.status==='upcoming'?'upcoming':'past'}`}>{t.status==='upcoming'?'Upcoming':'Completed'}</span>
-              <h3>{t.title}</h3><p>{t.sub}</p>
-              <div className="trip-meta"><span>{t.price}</span><span>{t.buddies}</span></div>
-              <button className="btn-outline-dash">View Details</button>
+        {trips.map(t => {
+          const status = tripStatus(t.startDate);
+          const start = t.startDate ? new Date(t.startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+          const end   = t.endDate   ? new Date(t.endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+          return (
+            <div className="my-trip-card" key={t.id}>
+              <div className="mtc-body">
+                <span className={`status-chip status-${status === 'upcoming' ? 'upcoming' : 'past'}`}>
+                  {status === 'upcoming' ? 'Upcoming' : 'Completed'}
+                </span>
+                <h3>{t.title || t.destination}</h3>
+                <p>{start}{end ? ` – ${end}` : ''}{t.destination ? ` · ${t.destination}` : ''}</p>
+                <div className="trip-meta">
+                  <span>${t.budget}</span>
+                  <span>{t.joinRequests?.length || 0} joined</span>
+                </div>
+                <button className="btn-outline-dash" onClick={() => setSelectedTrip(t)}>View Details</button>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+      {selectedTrip && <TripDetailModal trip={selectedTrip} onClose={() => setSelectedTrip(null)} />}
     </section>
   );
 }
 
 // ── Panel: Join a Trip ────────────────────────────────────────────────────────
 function PanelJoin() {
+  const [trips, setTrips] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [joined, setJoined] = useState({});
-  const trips = [
-    {img:'1518548419970-58e3b4079ab2',title:'Santorini, Greece',dates:'20 Feb – 28 Feb 2026',price:'$1,800',spots:'1 spot left',tags:['Beach','Sunsets'],host:'Lena M.',rating:'4.9'},
-    {img:'1499856871958-5b9627545d1a',title:'Paris, France',dates:'5 Mar – 12 Mar 2026',price:'$2,200',spots:'2 spots left',tags:['Culture','Food'],host:'Arjun S.',rating:'4.7'},
-    {img:'1506905925346-21bda4d32df4',title:'Swiss Alps Trek',dates:'10 Apr – 18 Apr 2026',price:'$2,500',spots:'3 spots left',tags:['Adventure','Nature'],host:'Kenji T.',rating:'5.0'},
-  ];
+
+  useEffect(() => {
+    fetchTrips()
+      .then(data => { setTrips(data); setLoading(false); })
+      .catch(err => { setError(err.message || 'Failed to load trips.'); setLoading(false); });
+  }, []);
+
+  async function handleJoin(trip) {
+    try {
+      await joinTrip(trip.id);
+      setJoined(j => ({ ...j, [trip.id]: true }));
+    } catch (err) {
+      if (err.status === 409) {
+        setJoined(j => ({ ...j, [trip.id]: true }));
+      } else {
+        setError(err.message || 'Failed to join trip.');
+      }
+    }
+  }
+
+  if (loading) return <section className="panel active"><p className="panel-loading">Loading trips…</p></section>;
+
   return (
     <section className="panel active">
       <h2 className="panel-heading">Join a Trip</h2>
-      <div className="filter-bar">
-        <input type="text" placeholder="Search destination..." className="filter-input" />
-        <select className="filter-select"><option>Any budget</option><option>Under $500</option><option>$500-$1500</option><option>$1500+</option></select>
-        <select className="filter-select"><option>Any style</option><option>Adventure</option><option>Beach</option><option>Culture</option></select>
-      </div>
+      {error && <p className="panel-error">{error}</p>}
+      {!error && trips.length === 0 && (
+        <p className="panel-empty">No trips available right now. Check back soon!</p>
+      )}
       <div className="join-list">
-        {trips.map(t=>(
-          <div className="join-card" key={t.title}>
-            <img src={`https://images.unsplash.com/photo-${t.img}?w=300&q=80`} alt={t.title} />
-            <div className="jc-body">
-              <h3>{t.title}</h3><p>{t.dates}</p>
-              <div className="trip-meta"><span>{t.price}</span><span>{t.spots}</span></div>
-              <div className="dest-tags">{t.tags.map(tg=><span key={tg}>{tg}</span>)}</div>
-              <p className="jc-host">Host: <strong>{t.host}</strong> &nbsp; {t.rating} / 5</p>
-              <button className="btn-primary-dash join-btn"
-                style={joined[t.title]?{background:'#16a34a'}:{}}
-                onClick={()=>setJoined(j=>({...j,[t.title]:true}))}>
-                {joined[t.title]?'Requested':'Request to Join'}
-              </button>
+        {trips.map(t => {
+          const start = t.startDate ? new Date(t.startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+          const end   = t.endDate   ? new Date(t.endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+          return (
+            <div className="join-card" key={t.id}>
+              <div className="jc-body">
+                <h3>{t.title || t.destination}</h3>
+                <p>{start}{end ? ` – ${end}` : ''}</p>
+                <div className="trip-meta">
+                  <span>${t.budget}</span>
+                  <span>{t.buddiesNeeded ? `${t.buddiesNeeded} buddies needed` : ''}</span>
+                </div>
+                {t.styles?.length > 0 && (
+                  <div className="dest-tags">{t.styles.map(s => <span key={s}>{s}</span>)}</div>
+                )}
+                <p className="jc-host">Destination: <strong>{t.destination}</strong></p>
+                <button className="btn-primary-dash join-btn"
+                  style={joined[t.id] ? {background:'#16a34a'} : {}}
+                  disabled={!!joined[t.id]}
+                  onClick={() => handleJoin(t)}>
+                  {joined[t.id] ? 'Requested' : 'Request to Join'}
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-// ── Panel: Chat ───────────────────────────────────────────────────────────────
-function PanelChat() {
-  const [messages, setMessages] = useState([
-    {type:'in',text:'Hey! Are you still up for Bali?',time:'10:32 AM'},
-    {type:'out',text:'Yes! Super excited. When are you thinking?',time:'10:34 AM'},
-    {type:'in',text:'Maybe late March? Found great deals on flights.',time:'10:35 AM'},
-  ]);
-  const [input, setInput] = useState('');
-  const [activeChat, setActiveChat] = useState('Arjun S.');
-  const [chatBadges, setChatBadges] = useState({'Arjun S.':2,'Kenji T.':1});
-  const msgsRef = useRef(null);
-
-  function sendMsg() {
-    if (!input.trim()) return;
-    const now = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-    setMessages(m=>[...m,{type:'out',text:input.trim(),time:now}]);
-    setInput('');
-  }
-
-  useEffect(() => { msgsRef.current?.scrollTo(0, msgsRef.current.scrollHeight); }, [messages]);
-
-  const contacts = [{a:'A',name:'Arjun S.',last:'Hey! Still up for Bali?'},{a:'L',name:'Lena M.',last:'I booked the flights!'},{a:'K',name:'Kenji T.',last:'Budget for Peru?'}];
-
-  return (
-    <section className="panel active">
-      <div className="chat-layout">
-        <div className="chat-sidebar">
-          <h3>Messages</h3>
-          <div className="chat-list">
-            {contacts.map(c=>(
-              <div key={c.name} className={`chat-item${activeChat===c.name?' active':''}`}
-                onClick={()=>{ setActiveChat(c.name); setChatBadges(b=>({...b,[c.name]:0})); }}>
-                <div className="chat-avatar">{c.a}</div>
-                <div className="chat-preview"><span className="chat-name">{c.name}</span><span className="chat-last">{c.last}</span></div>
-                {chatBadges[c.name]>0 && <span className="chat-badge">{chatBadges[c.name]}</span>}
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="chat-main">
-          <div className="chat-header-bar">
-            <div className="chat-avatar">{contacts.find(c=>c.name===activeChat)?.a}</div>
-            <div><span className="chat-name">{activeChat}</span><span className="chat-status">Online</span></div>
-          </div>
-          <div className="chat-messages" ref={msgsRef}>
-            {messages.map((m,i)=>(
-              <div key={i} className={`msg msg-${m.type}`}>
-                <div className="msg-bubble">{m.text}</div>
-                <span className="msg-time">{m.time}</span>
-              </div>
-            ))}
-          </div>
-          <div className="chat-input-bar">
-            <input type="text" placeholder="Type a message..." value={input}
-              onChange={e=>setInput(e.target.value)} onKeyDown={e=>{ if(e.key==='Enter') sendMsg(); }} />
-            <button className="btn-send" onClick={sendMsg}>Send</button>
-          </div>
-        </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -421,16 +622,63 @@ function PanelExplore() {
 }
 
 // ── Panel: Filter ─────────────────────────────────────────────────────────────
-function PanelFilter() {
+function PanelFilter({ searchQuery }) {
   const [chips, setChips] = useState([]);
+  const [destination, setDestination] = useState(searchQuery || '');
+  const [minBudget, setMinBudget] = useState('');
+  const [maxBudget, setMaxBudget] = useState('');
+  const [duration, setDuration] = useState('any');
+  const [gender, setGender] = useState('any');
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
   function toggleChip(c) { setChips(s => s.includes(c) ? s.filter(x=>x!==c) : [...s,c]); }
+
+  async function doFetch(dest) {
+    setLoading(true);
+    setError(null);
+    try {
+      const filters = {};
+      if (dest)      filters.destination = dest;
+      if (chips[0])  filters.style = chips[0];
+      if (minBudget) filters.minBudget = minBudget;
+      if (maxBudget) filters.maxBudget = maxBudget;
+      if (duration && duration !== 'any') filters.duration = duration;
+      if (gender && gender !== 'any')     filters.gender = gender;
+      const data = await fetchTrips(filters);
+      setResults(data);
+    } catch (err) {
+      setError(err.message || 'Failed to fetch trips.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Auto-fire when searchQuery prop is set on mount
+  useEffect(() => {
+    if (searchQuery) {
+      setDestination(searchQuery);
+      doFetch(searchQuery);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  function handleApply(e) {
+    e.preventDefault();
+    doFetch(destination);
+  }
+
   return (
     <section className="panel active">
       <h2 className="panel-heading">Filter Trips</h2>
       <div className="filter-page">
         <div className="filter-controls">
           <h3>Filters</h3>
-          <div className="form-group"><label>Destination</label><input type="text" placeholder="Where do you want to go?" /></div>
+          <div className="form-group">
+            <label>Destination</label>
+            <input type="text" placeholder="Where do you want to go?" value={destination} onChange={e => setDestination(e.target.value)} />
+          </div>
           <div className="form-group">
             <label>Travel Style</label>
             <div className="style-chips">
@@ -440,27 +688,66 @@ function PanelFilter() {
             </div>
           </div>
           <div className="form-row">
-            <div className="form-group"><label>Min Budget ($)</label><input type="number" placeholder="0" /></div>
-            <div className="form-group"><label>Max Budget ($)</label><input type="number" placeholder="5000" /></div>
+            <div className="form-group"><label>Min Budget ($)</label><input type="number" placeholder="0" value={minBudget} onChange={e => setMinBudget(e.target.value)} /></div>
+            <div className="form-group"><label>Max Budget ($)</label><input type="number" placeholder="5000" value={maxBudget} onChange={e => setMaxBudget(e.target.value)} /></div>
           </div>
           <div className="form-group">
             <label>Duration</label>
-            <select className="filter-select" style={{width:'100%'}}>
-              <option>Any</option><option>Weekend (1-3 days)</option><option>Short (4-7 days)</option>
-              <option>Medium (1-2 weeks)</option><option>Long (2+ weeks)</option>
+            <select className="filter-select" style={{width:'100%'}} value={duration} onChange={e => setDuration(e.target.value)}>
+              <option value="any">Any</option>
+              <option value="weekend">Weekend (1-3 days)</option>
+              <option value="short">Short (4-7 days)</option>
+              <option value="medium">Medium (1-2 weeks)</option>
+              <option value="long">Long (2+ weeks)</option>
             </select>
           </div>
           <div className="form-group">
             <label>Gender Preference</label>
             <div className="gender-options">
               {[['any','Any'],['female','Female only'],['male','Male only'],['mixed','Mixed group']].map(([v,l])=>(
-                <label key={v} className="radio-label"><input type="radio" name="gender" value={v} defaultChecked={v==='any'} /> {l}</label>
+                <label key={v} className="radio-label">
+                  <input type="radio" name="gender" value={v} checked={gender === v} onChange={() => setGender(v)} /> {l}
+                </label>
               ))}
             </div>
           </div>
-          <button className="btn-primary-dash" style={{width:'100%',marginTop:'0.5rem'}}>Apply Filters</button>
+          <button className="btn-primary-dash" style={{width:'100%',marginTop:'0.5rem'}} onClick={handleApply} disabled={loading}>
+            {loading ? 'Searching…' : 'Apply Filters'}
+          </button>
         </div>
-        <div className="filter-empty" id="filter-results-area"></div>
+        <div className="filter-results-area" id="filter-results-area">
+          {error && <p className="panel-error">{error}</p>}
+          {results === null && !loading && (
+            <p className="panel-empty">Use the filters on the left to find trips.</p>
+          )}
+          {results !== null && results.length === 0 && !loading && (
+            <p className="panel-empty">No trips found matching your filters.</p>
+          )}
+          {results !== null && results.length > 0 && (
+            <div className="join-list">
+              {results.map(t => {
+                const start = t.startDate ? new Date(t.startDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+                const end   = t.endDate   ? new Date(t.endDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+                return (
+                  <div className="join-card" key={t.id}>
+                    <div className="jc-body">
+                      <h3>{t.title || t.destination}</h3>
+                      <p>{start}{end ? ` – ${end}` : ''}</p>
+                      <div className="trip-meta">
+                        <span>${t.budget}</span>
+                        {t.buddiesNeeded && <span>{t.buddiesNeeded} buddies needed</span>}
+                      </div>
+                      {t.styles?.length > 0 && (
+                        <div className="dest-tags">{t.styles.map(s => <span key={s}>{s}</span>)}</div>
+                      )}
+                      <p className="jc-host">Destination: <strong>{t.destination}</strong></p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -472,7 +759,6 @@ function PanelProfile({ profile, onSave }) {
   const [saved, setSaved] = useState(false);
   const fileInputRef = useRef(null);
 
-  // sync if profile prop changes (e.g. first load)
   useEffect(() => { setForm({ ...profile }); }, [profile]);
 
   function set(field, val) { setForm(f => ({ ...f, [field]: val })); setSaved(false); }
@@ -497,8 +783,6 @@ function PanelProfile({ profile, onSave }) {
   return (
     <section className="panel active">
       <div className="profile-page">
-
-        {/* ── Cover card ── */}
         <div className="profile-cover-card">
           <div className="profile-cover-art">
             <div className="cover-orb cover-orb--1"></div>
@@ -612,54 +896,56 @@ function PanelProfile({ profile, onSave }) {
 function PanelSettings({ profile, onSave }) {
   const navigate = useNavigate();
   const [passwords, setPasswords] = useState({ current: '', next: '', confirm: '' });
-  const [pwMsg,     setPwMsg]     = useState(null); // {type:'success'|'error', text}
+  const [pwMsg,     setPwMsg]     = useState(null);
   const [notifs,    setNotifs]    = useState({ matches: true, messages: true, tripUpdates: true, newsletter: false });
   const [showDelete, setShowDelete] = useState(false);
   const [deleteInput, setDeleteInput] = useState('');
+  const [deletePass,  setDeletePass]  = useState('');
+  const [deleteMsg,   setDeleteMsg]   = useState(null);
+  const [pwLoading,   setPwLoading]   = useState(false);
+  const [delLoading,  setDelLoading]  = useState(false);
 
   function setPw(f, v) { setPasswords(p => ({ ...p, [f]: v })); setPwMsg(null); }
 
-  function handleChangePassword(e) {
+  async function handleChangePassword(e) {
     e.preventDefault();
     const { current, next, confirm } = passwords;
-    if (!current) { setPwMsg({ type: 'error', text: 'Enter your current password.' }); return; }
-    if (next.length < 8) { setPwMsg({ type: 'error', text: 'New password must be at least 8 characters.' }); return; }
-    if (next !== confirm) { setPwMsg({ type: 'error', text: 'Passwords do not match.' }); return; }
+    if (!current)          { setPwMsg({ type: 'error', text: 'Enter your current password.' }); return; }
+    if (next.length < 8)   { setPwMsg({ type: 'error', text: 'New password must be at least 8 characters.' }); return; }
+    if (next !== confirm)  { setPwMsg({ type: 'error', text: 'Passwords do not match.' }); return; }
 
-    // verify current password against stored hash
+    setPwLoading(true);
     try {
-      const users = JSON.parse(localStorage.getItem('tb_users') || '[]');
-      // inline djb2 hash
-      function djb2(str) { let h = 5381; for (let i = 0; i < str.length; i++) { h = ((h << 5) + h) ^ str.charCodeAt(i); h = h >>> 0; } return String(h); }
-      const idx = users.findIndex(u => u.email === profile.email);
-      if (idx === -1 || users[idx].passwordHash !== djb2(current)) {
-        setPwMsg({ type: 'error', text: 'Current password is incorrect.' }); return;
-      }
-      users[idx].passwordHash = djb2(next);
-      localStorage.setItem('tb_users', JSON.stringify(users));
+      const { changePassword } = await import('../utils/auth.js');
+      await changePassword(current, next);
       setPasswords({ current: '', next: '', confirm: '' });
       setPwMsg({ type: 'success', text: 'Password updated successfully.' });
-    } catch(_) {
-      setPwMsg({ type: 'error', text: 'Something went wrong. Try again.' });
+    } catch (err) {
+      setPwMsg({ type: 'error', text: err.message });
+    } finally {
+      setPwLoading(false);
     }
   }
 
-  function handleDeleteAccount() {
+  async function handleDeleteAccount() {
     if (deleteInput !== profile.name) return;
+    if (!deletePass) { setDeleteMsg({ type: 'error', text: 'Enter your password to confirm.' }); return; }
+
+    setDelLoading(true);
     try {
-      const users = JSON.parse(localStorage.getItem('tb_users') || '[]');
-      localStorage.setItem('tb_users', JSON.stringify(users.filter(u => u.email !== profile.email)));
-      localStorage.removeItem('tb_profile');
-      sessionStorage.removeItem('tb_session');
-    } catch(_) {}
-    navigate('/');
+      const { deleteAccount, clearSession } = await import('../utils/auth.js');
+      await deleteAccount(deletePass);
+      clearSession();
+      navigate('/');
+    } catch (err) {
+      setDeleteMsg({ type: 'error', text: err.message });
+      setDelLoading(false);
+    }
   }
 
   return (
     <section className="panel active">
       <div className="settings-page">
-
-        {/* Account */}
         <div className="settings-section">
           <h3 className="settings-section-title">Account</h3>
           <div className="settings-row">
@@ -676,7 +962,6 @@ function PanelSettings({ profile, onSave }) {
           </div>
         </div>
 
-        {/* Change password */}
         <div className="settings-section">
           <h3 className="settings-section-title">Change Password</h3>
           <form className="settings-form" onSubmit={handleChangePassword}>
@@ -695,18 +980,19 @@ function PanelSettings({ profile, onSave }) {
               </div>
             </div>
             {pwMsg && <p className={pwMsg.type === 'success' ? 'settings-msg-ok' : 'settings-msg-err'}>{pwMsg.text}</p>}
-            <button type="submit" className="btn-primary-dash">Update Password</button>
+            <button type="submit" className="btn-primary-dash" disabled={pwLoading}>
+              {pwLoading ? 'Updating…' : 'Update Password'}
+            </button>
           </form>
         </div>
 
-        {/* Notifications */}
         <div className="settings-section">
           <h3 className="settings-section-title">Notifications</h3>
           {[
-            { key: 'matches',     label: 'New buddy matches',       sub: 'Get notified when someone matches your trip' },
-            { key: 'messages',    label: 'Messages',                sub: 'Notifications for new chat messages' },
-            { key: 'tripUpdates', label: 'Trip updates',            sub: 'Changes to trips you joined or created' },
-            { key: 'newsletter',  label: 'Tips & inspiration',      sub: 'Occasional travel ideas from TravelBuddy' },
+            { key: 'matches',     label: 'New buddy matches',  sub: 'Get notified when someone matches your trip' },
+            { key: 'messages',    label: 'Messages',           sub: 'Notifications for new chat messages' },
+            { key: 'tripUpdates', label: 'Trip updates',       sub: 'Changes to trips you joined or created' },
+            { key: 'newsletter',  label: 'Tips & inspiration', sub: 'Occasional travel ideas from TravelBuddy' },
           ].map(n => (
             <div className="settings-toggle-row" key={n.key}>
               <div>
@@ -724,7 +1010,6 @@ function PanelSettings({ profile, onSave }) {
           ))}
         </div>
 
-        {/* Danger zone */}
         <div className="settings-section settings-danger-zone">
           <h3 className="settings-section-title settings-danger-title">Danger Zone</h3>
           {!showDelete ? (
@@ -747,18 +1032,26 @@ function PanelSettings({ profile, onSave }) {
                 value={deleteInput}
                 onChange={e => setDeleteInput(e.target.value)}
               />
+              <input
+                type="password"
+                className="delete-confirm-input"
+                placeholder="Enter your password"
+                value={deletePass}
+                onChange={e => { setDeletePass(e.target.value); setDeleteMsg(null); }}
+                style={{ marginTop: '0.5rem' }}
+              />
+              {deleteMsg && <p className={deleteMsg.type === 'success' ? 'settings-msg-ok' : 'settings-msg-err'}>{deleteMsg.text}</p>}
               <div className="delete-confirm-actions">
-                <button className="btn-danger" disabled={deleteInput !== profile.name} onClick={handleDeleteAccount}>
-                  Yes, delete my account
+                <button className="btn-danger" disabled={deleteInput !== profile.name || delLoading} onClick={handleDeleteAccount}>
+                  {delLoading ? 'Deleting…' : 'Yes, delete my account'}
                 </button>
-                <button className="btn-outline-dash" onClick={() => { setShowDelete(false); setDeleteInput(''); }}>
+                <button className="btn-outline-dash" onClick={() => { setShowDelete(false); setDeleteInput(''); setDeletePass(''); setDeleteMsg(null); }}>
                   Cancel
                 </button>
               </div>
             </div>
           )}
         </div>
-
       </div>
     </section>
   );
@@ -770,8 +1063,9 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const [activePanel,      setActivePanel]      = useState('home');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  // Lifted search query — shared between PanelHome and PanelFilter
+  const [searchQuery, setSearchQuery] = useState('');
 
-  // Lifted profile state — persists across panel switches
   const [profile, setProfile] = useState(() => {
     try {
       const saved = localStorage.getItem('tb_profile');
@@ -798,14 +1092,14 @@ export default function Dashboard() {
   function handleLogout() { clearSession(); navigate('/'); }
 
   const panels = {
-    home:    <PanelHome    onSwitch={setActivePanel} />,
-    create:  <PanelCreate  onSwitch={setActivePanel} />,
-    mytrips: <PanelMyTrips />,
-    join:    <PanelJoin />,
-    chat:    <PanelChat />,
-    explore: <PanelExplore />,
-    filter:  <PanelFilter />,
-    profile:  <PanelProfile profile={profile} onSave={saveProfile} />,
+    home:     <PanelHome    onSwitch={setActivePanel} searchQuery={searchQuery} setSearchQuery={setSearchQuery} />,
+    create:   <PanelCreate  onSwitch={setActivePanel} />,
+    mytrips:  <PanelMyTrips />,
+    join:     <PanelJoin />,
+    chat:     <Chat />,
+    explore:  <PanelExplore />,
+    filter:   <PanelFilter  searchQuery={searchQuery} />,
+    profile:  <PanelProfile  profile={profile} onSave={saveProfile} />,
     settings: <PanelSettings profile={profile} onSave={saveProfile} />,
   };
 
